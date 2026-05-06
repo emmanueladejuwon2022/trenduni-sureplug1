@@ -1,0 +1,5 @@
+{
+  "name": "TRENDUNI SUREPLUG",
+  "description": "A real-time, AI-powered, location-based demand marketplace for campus communities.",
+  "requestFramePermissions": ["geolocation"]
+}

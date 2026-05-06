@@ -1,0 +1,233 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      // Just hardcoding admin email for this app's logic ("emmanueladejuwon2021@gmail.com")
+      return isSignedIn() && request.auth.token.email == 'emmanueladejuwon2021@gmail.com';
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role']) 
+        && data.email is string 
+        && data.email.size() <= 100
+        && data.role is string 
+        && data.role in ['user', 'vendor', 'admin'];
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isVerified()
+                    && isValidUser(incoming())
+                    && incoming().keys().size() <= 8
+                    && (!('walletBalance' in incoming()) || incoming().walletBalance == 0)
+                    && incoming().email == request.auth.token.email;
+      allow update: if isOwner(userId) && isValidUser(incoming())
+                    && incoming().email == existing().email 
+                    && (isAdmin() || (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contextRequestId', 'contextRequestText', 'role', 'updatedAt'])
+                    ));
+      allow delete: if isAdmin();
+    }
+
+    function isValidVendor(data) {
+      return data.keys().hasAll(['category', 'description'])
+        && data.category is string && data.category.size() <= 50
+        && data.description is string && data.description.size() <= 2000;
+    }
+
+    match /vendors/{vendorId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(vendorId) && isVerified() && isValidVendor(incoming());
+      allow update: if isOwner(vendorId) && isVerified() && isValidVendor(incoming())
+                    && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['category', 'description', 'contact', 'services', 'portfolio', 'updatedAt']));
+    }
+
+    function isValidRequest(data) {
+      return data.keys().hasAll(['userId', 'title', 'description', 'status'])
+        && isValidId(data.userId)
+        && data.title is string && data.title.size() <= 100
+        && data.description is string && data.description.size() <= 2000
+        && data.status is string 
+        && data.status in ['open', 'in-progress', 'completed', 'cancelled'];
+    }
+
+    match /requests/{requestId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isVerified() && isValidRequest(incoming()) && incoming().userId == request.auth.uid;
+      allow update: if isSignedIn() && isValidRequest(incoming())
+                    && incoming().userId == existing().userId
+                    && (isAdmin() || (existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'budget', 'status', 'assignedVendorId', 'updatedAt'])));
+    }
+
+    function isValidChat(data) {
+      return data.keys().hasAll(['participants', 'updatedAt'])
+        && data.participants is list
+        && data.participants.size() == 2
+        && (data.participants[0] is string && data.participants[0].size() <= 128)
+        && (data.participants[1] is string && data.participants[1].size() <= 128);
+    }
+
+    match /chats/{chatId} {
+      allow get: if isSignedIn() && isValidId(chatId) && (request.auth.uid in existing().participants || isAdmin());
+      allow list: if isSignedIn() && (request.auth.uid in resource.data.participants || isAdmin());
+      allow create: if isSignedIn() && isVerified() && isValidChat(incoming()) && request.auth.uid in incoming().participants;
+      allow update: if isSignedIn() && (request.auth.uid in existing().participants || isAdmin())
+                    && (
+                      // Allowing update of lastMessage, lastReadAt, and updatedAt
+                      incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'lastReadAt', 'updatedAt', 'contextRequestId', 'contextRequestCategory'])
+                      && (!('lastMessage' in incoming()) || (incoming().lastMessage is string && incoming().lastMessage.size() <= 2000))
+                    );
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['chatId', 'senderId', 'text', 'createdAt'])
+        && isValidId(data.chatId)
+        && isValidId(data.senderId)
+        && data.text is string && data.text.size() <= 2000
+        && (!('replyToId' in data) || isValidId(data.replyToId));
+    }
+
+    match /messages/{messageId} {
+      allow get: if isSignedIn() && (isValidId(messageId) || isAdmin());
+      allow list: if isSignedIn() && resource.data.chatId is string 
+                  && (request.auth.uid in get(/databases/$(database)/documents/chats/$(resource.data.chatId)).data.participants || isAdmin());
+      allow create: if isSignedIn() && isVerified() && isValidMessage(incoming())
+                    && incoming().senderId == request.auth.uid
+                    && request.auth.uid in get(/databases/$(database)/documents/chats/$(incoming().chatId)).data.participants;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    function isValidEscrow(data) {
+      return data.keys().hasAll(['buyerId', 'vendorId', 'participants', 'amount', 'status'])
+        && isValidId(data.buyerId)
+        && isValidId(data.vendorId)
+        && (data.amount is string || data.amount is number)
+        && data.status is string && data.status in ['held', 'released', 'refunded', 'disputed'];
+    }
+    
+    match /escrows/{escrowId} {
+      allow get: if isSignedIn() && isValidId(escrowId) && request.auth.uid in existing().participants;
+      allow list: if isAdmin() || (isSignedIn() && request.auth.uid in resource.data.participants);
+      allow create: if isSignedIn() && isVerified() && isValidEscrow(incoming()) && incoming().buyerId == request.auth.uid && request.auth.uid in incoming().participants;
+      allow update: if isSignedIn() && isValidEscrow(incoming()) && request.auth.uid in existing().participants 
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['userId', 'amount', 'type', 'description'])
+        && isValidId(data.userId)
+        && (data.amount is string || data.amount is number)
+        && data.type is string && data.type in ['credit', 'debit']
+        && data.description is string && data.description.size() <= 200;
+    }
+
+    match /transactions/{transactionId} {
+      allow list: if isSignedIn() && (isAdmin() || request.auth.uid == resource.data.userId);
+      allow get: if isSignedIn() && (isAdmin() || request.auth.uid == resource.data.userId);
+      allow create: if isSignedIn() && isVerified() && isValidTransaction(incoming()) 
+                    && incoming().userId == request.auth.uid
+                    && (!('status' in incoming()) || (incoming().status is string && incoming().status.size() <= 20));
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    function isValidDispute(data) {
+      return data.keys().hasAll(['escrowId', 'reportedBy', 'otherUserId', 'amount', 'reason', 'description', 'status'])
+        && isValidId(data.escrowId)
+        && isValidId(data.reportedBy)
+        && isValidId(data.otherUserId)
+        && (data.amount is string || data.amount is number)
+        && data.reason is string && data.reason.size() <= 200
+        && data.description is string && data.description.size() <= 1000
+        && data.status is string && data.status.size() <= 20;
+    }
+
+    match /disputes/{disputeId} {
+      allow read: if isAdmin() || (isSignedIn() && (request.auth.uid == resource.data.reportedBy || request.auth.uid == resource.data.otherUserId));
+      allow create: if isSignedIn() && isVerified() && isValidDispute(incoming()) && incoming().reportedBy == request.auth.uid;
+      allow update: if isAdmin();
+    }
+
+    function isValidReview(data) {
+      return data.keys().hasAll(['vendorId', 'userId', 'rating', 'comment'])
+        && isValidId(data.vendorId)
+        && isValidId(data.userId)
+        && data.rating is number && data.rating >= 1 && data.rating <= 5
+        && data.comment is string && data.comment.size() <= 1000;
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isVerified() 
+                    && isValidReview(incoming())
+                    && incoming().userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'title', 'message', 'type', 'read'])
+        && isValidId(data.userId)
+        && data.title is string && data.title.size() <= 100
+        && data.message is string && data.message.size() <= 500
+        && data.type is string 
+        && data.read is bool;
+    }
+
+    match /notifications/{notificationId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn(); 
+      allow update: if isSignedIn() && existing().userId == request.auth.uid 
+                    && isValidNotification(incoming())
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    function isValidWithdrawal(data) {
+      return data.keys().hasAll(['userId', 'amount', 'paymentInfo', 'status'])
+        && isValidId(data.userId)
+        && (data.amount is string || data.amount is number)
+        && data.status is string && data.status in ['pending', 'approved', 'rejected']
+        && data.paymentInfo is map;
+    }
+
+    match /withdrawals/{withdrawalId} {
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && isVerified() && isValidWithdrawal(incoming()) && incoming().userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+  }
+}
